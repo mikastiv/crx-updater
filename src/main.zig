@@ -9,6 +9,7 @@ var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
 const stderr = &stderr_writer.interface;
 
 const manifest_json = "manifest.json";
+const locale_dir = "_locales/en";
 
 pub fn main() !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -26,6 +27,8 @@ pub fn main() !void {
     };
 
     for (ids) |id| {
+        _ = arena.reset(.retain_capacity);
+
         const browser_version = try getChromeVersion(allocator);
 
         const filename = try makeTempName(allocator);
@@ -57,7 +60,11 @@ pub fn main() !void {
                 extension_name = name;
             }
         }
-        const version = if (root.object.get("version")) |version| version.string else return error.NoVersionInManifest;
+
+        const version = if (root.object.get("version")) |version|
+            version.string
+        else
+            return error.NoVersionInManifest;
 
         std.debug.print("{s}: {s}\n", .{ extension_name, version });
     }
@@ -108,10 +115,11 @@ fn extractManifestAndLocale(
         const filename = filename_buffer[0..entry.filename_len];
         try reader.seekTo(entry.header_zip_offset + @sizeOf(std.zip.CentralDirectoryFileHeader));
         try reader.interface.readSliceAll(filename);
+
         if (std.mem.eql(u8, filename, manifest_json)) {
             try entry.extract(reader, .{}, &filename_buffer, dest);
             found_manifest = true;
-        } else if (std.mem.startsWith(u8, filename, "_locales/en") and
+        } else if (std.mem.startsWith(u8, filename, locale_dir) and
             std.mem.endsWith(u8, filename, "messages.json"))
         {
             locale = try allocator.dupe(u8, filename);
@@ -136,6 +144,7 @@ fn getChromeVersion(allocator: std.mem.Allocator) ![]const u8 {
     const chrome_str = std.mem.sliceTo(raw_version, ' ');
     const version_str = raw_version[chrome_str.len + 1 ..];
     const version = std.mem.sliceTo(version_str, '.');
+
     return version;
 }
 
@@ -163,7 +172,7 @@ fn downloadCrxFile(
     reader.toss(header_length);
 
     const file = try std.fs.createFileAbsolute(filename, .{ .read = true });
-    errdefer std.fs.deleteDirAbsolute(filename) catch {};
+    errdefer std.fs.deleteFileAbsolute(filename) catch {};
     errdefer file.close();
 
     try file.writeAll(reader.buffered());
@@ -179,11 +188,13 @@ fn makeDownloadUrl(
 ) ![]u8 {
     const template = "https://clients2.google.com/service/update2/crx?response=redirect&acceptformat=crx2,crx3&prodversion={s}&x=id%3D{s}%26installsource%3Dondemand%26uc";
     const url = try std.fmt.allocPrint(allocator, template, .{ browser_version, id });
+
     return url;
 }
 
 fn makeTempName(allocator: std.mem.Allocator) ![]u8 {
     const random_bytes = std.crypto.random.int(u64);
     const name = try std.fmt.allocPrint(allocator, "/tmp/tmp_{x}", .{random_bytes});
+
     return name;
 }
