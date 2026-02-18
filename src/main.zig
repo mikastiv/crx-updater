@@ -24,20 +24,21 @@ pub fn main() !void {
 
     const filename = try makeTempName(allocator);
 
-    try downloadCrxFile(allocator, filename, browser_version, id);
+    const zip_archive = try downloadCrxFile(allocator, filename, browser_version, id);
     defer std.fs.deleteFileAbsolute(filename) catch {};
+    defer zip_archive.close();
+
+    var zip_buffer: [1024]u8 = undefined;
+    var zip_reader = zip_archive.reader(&zip_buffer);
 
     const tempdir = try makeTempName(allocator);
-
-    var unzip = std.process.Child.init(&.{ "unzip", "-d", tempdir, filename }, allocator);
-    unzip.stdin_behavior = .Ignore;
-    unzip.stdout_behavior = .Ignore;
-    unzip.stderr_behavior = .Ignore;
-    _ = try unzip.spawnAndWait();
+    try std.fs.makeDirAbsolute(tempdir);
+    defer std.fs.deleteTreeAbsolute(tempdir) catch {};
 
     var dest = try std.fs.openDirAbsolute(tempdir, .{});
-    defer std.fs.deleteTreeAbsolute(tempdir) catch {};
     defer dest.close();
+
+    try std.zip.extract(dest, &zip_reader, .{});
 
     const manifest = try dest.openFile("manifest.json", .{});
     defer manifest.close();
@@ -67,7 +68,7 @@ fn downloadCrxFile(
     filename: []const u8,
     browser_version: []const u8,
     id: []const u8,
-) !void {
+) !std.fs.File {
     var client: std.http.Client = .{ .allocator = allocator };
     var response_writer: std.Io.Writer.Allocating = .init(allocator);
 
@@ -78,11 +79,21 @@ fn downloadCrxFile(
 
     if (http_response.status != .ok) return error.DownloadFailed;
 
-    const crx_file = try std.fs.createFileAbsolute(filename, .{});
-    errdefer std.fs.deleteFileAbsolute(filename) catch {};
-    defer crx_file.close();
+    var reader = std.Io.Reader.fixed(response_writer.written());
+    const magic = try reader.takeInt(u32, .little);
+    if (magic != 0x34327243) return error.InvalidCrxFile;
+    reader.toss(4); // version
+    const header_length = try reader.takeInt(u32, .little);
+    reader.toss(header_length);
 
-    try crx_file.writeAll(response_writer.written());
+    const file = try std.fs.createFileAbsolute(filename, .{ .read = true });
+    errdefer std.fs.deleteDirAbsolute(filename) catch {};
+    errdefer file.close();
+
+    try file.writeAll(reader.buffered());
+    try file.seekTo(0);
+
+    return file;
 }
 
 fn makeDownloadUrl(
