@@ -11,6 +11,11 @@ const stderr = &stderr_writer.interface;
 const manifest_json = "manifest.json";
 const locale_dir = "_locales/en";
 
+const ChromeExtension = struct {
+    id: []const u8,
+    version: []const u8,
+};
+
 pub fn main() !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
@@ -23,8 +28,8 @@ pub fn main() !void {
 
     var fba_buffer: [4096]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&fba_buffer);
-    const id_allocator = fba.allocator();
-    var ids: std.ArrayList([]const u8) = try .initCapacity(id_allocator, 64);
+    const extension_allocator = fba.allocator();
+    var extensions: std.ArrayList(ChromeExtension) = try .initCapacity(extension_allocator, 64);
 
     const nix_file_content = try nix_file.readToEndAlloc(allocator, 64 * 1024);
     const needle = "(createChromiumExtension {";
@@ -34,23 +39,42 @@ pub fn main() !void {
         const end = std.mem.indexOf(u8, haystack[start..], "})") orelse break;
         const chunk = haystack[start .. start + end];
 
+        var extension: ChromeExtension = .{
+            .id = "",
+            .version = "",
+        };
+
         const id_marker = "id = ";
-        if (std.mem.indexOf(u8, chunk, id_marker)) |id_index| {
-            const id = std.mem.sliceTo(chunk[id_index + id_marker.len ..], ';');
-            try ids.appendBounded(try id_allocator.dupe(u8, std.mem.trim(u8, id, "\"")));
+        const id_index = std.mem.indexOf(u8, chunk, id_marker);
+        const version_marker = "version = ";
+        const version_index = std.mem.indexOf(u8, chunk, version_marker);
+
+        if (id_index == null or version_index == null) {
+            try stderr.writeAll("warning: missing data for an extension... skipping\n");
+            try stderr.flush();
+            haystack = haystack[index + end ..];
+            continue;
         }
+
+        const id = std.mem.sliceTo(chunk[id_index.? + id_marker.len ..], ';');
+        extension.id = try extension_allocator.dupe(u8, std.mem.trim(u8, id, "\""));
+
+        const version = std.mem.sliceTo(chunk[version_index.? + version_marker.len ..], ';');
+        extension.version = try extension_allocator.dupe(u8, std.mem.trim(u8, version, "\""));
+
+        try extensions.appendBounded(extension);
 
         haystack = haystack[index + end ..];
     }
 
-    for (ids.items) |id| {
+    for (extensions.items) |extension| {
         _ = arena.reset(.retain_capacity);
 
         const browser_version = try getChromeVersion(allocator);
 
         const filename = try makeTempName(allocator);
 
-        const zip_archive = try downloadCrxFile(allocator, filename, browser_version, id);
+        const zip_archive = try downloadCrxFile(allocator, filename, browser_version, extension.id);
         defer std.fs.deleteFileAbsolute(filename) catch {};
         defer zip_archive.close();
 
@@ -78,13 +102,19 @@ pub fn main() !void {
             }
         }
 
-        const version = if (root.object.get("version")) |version|
-            version.string
+        const latest_version = if (root.object.get("version")) |ver|
+            ver.string
         else
             return error.NoVersionInManifest;
 
-        std.debug.print("{s}: {s}\n", .{ extension_name, version });
+        try stdout.print("{s}\n  current: {s}\n  latest:  {s}\n", .{
+            extension_name,
+            extension.version,
+            latest_version,
+        });
     }
+
+    try stdout.flush();
 }
 
 fn lookupLocaleName(
