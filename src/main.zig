@@ -17,16 +17,33 @@ pub fn main() !void {
 
     const allocator = arena.allocator();
 
-    const ids: []const []const u8 = &.{
-        "cjpalhdlnbpafiamejdnhcphjbkeiagm",
-        "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
-        "eimadpbcbfnmbkopoojfekhnkhdbieeh",
-        "ldpochfccmkkmhdbclfhpagapcfdljkj",
-        "pkehgijcmpdhfbdbbnkijodmdjhbjlgp",
-        "ponfpcnoihfmfllpaingbgckeeldkhle",
-    };
+    const nix_filename = "/home/mikastiv/.flake/home.nix";
+    const nix_file = try std.fs.cwd().openFile(nix_filename, .{});
+    defer nix_file.close();
 
-    for (ids) |id| {
+    var fba_buffer: [4096]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&fba_buffer);
+    const id_allocator = fba.allocator();
+    var ids: std.ArrayList([]const u8) = try .initCapacity(id_allocator, 64);
+
+    const nix_file_content = try nix_file.readToEndAlloc(allocator, 64 * 1024);
+    const needle = "(createChromiumExtension {";
+    var haystack = nix_file_content;
+    while (std.mem.indexOf(u8, haystack, needle)) |index| {
+        const start = index + needle.len;
+        const end = std.mem.indexOf(u8, haystack[start..], "})") orelse break;
+        const chunk = haystack[start .. start + end];
+
+        const id_marker = "id = ";
+        if (std.mem.indexOf(u8, chunk, id_marker)) |id_index| {
+            const id = std.mem.sliceTo(chunk[id_index + id_marker.len ..], ';');
+            try ids.appendBounded(try id_allocator.dupe(u8, std.mem.trim(u8, id, "\"")));
+        }
+
+        haystack = haystack[index + end ..];
+    }
+
+    for (ids.items) |id| {
         _ = arena.reset(.retain_capacity);
 
         const browser_version = try getChromeVersion(allocator);
