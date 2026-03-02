@@ -17,7 +17,15 @@ const ChromeExtension = struct {
 };
 
 pub fn main() !void {
-    const nix_filename = "/home/mikastiv/.flake/home.nix";
+    defer stdout.flush() catch {};
+    defer stderr.flush() catch {};
+
+    if (std.os.argv.len != 2) {
+        try stderr.writeAll("usage: crx-updater <nix file path>\n");
+        return error.MissingFilepath;
+    }
+
+    const nix_filename = std.mem.span(std.os.argv[1]);
     const nix_file = try std.fs.cwd().openFile(nix_filename, .{ .mode = .read_write });
     defer nix_file.close();
 
@@ -62,7 +70,6 @@ pub fn main() !void {
 
         if (id_index == null or version_index == null) {
             try stderr.writeAll("warning: missing data for an extension... skipping\n");
-            try stderr.flush();
             haystack = haystack[index + end ..];
             continue;
         }
@@ -143,7 +150,6 @@ pub fn main() !void {
     try nix_writer.writeAll(blocks.getLast());
 
     try nix_writer.flush();
-    try stdout.flush();
 }
 
 fn lookupLocaleName(
