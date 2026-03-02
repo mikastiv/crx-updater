@@ -17,27 +17,38 @@ const ChromeExtension = struct {
 };
 
 pub fn main() !void {
-    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
-
     const nix_filename = "/home/mikastiv/.flake/home.nix";
-    const nix_file = try std.fs.cwd().openFile(nix_filename, .{});
+    const nix_file = try std.fs.cwd().openFile(nix_filename, .{ .mode = .read_write });
     defer nix_file.close();
+
+    var nix_file_buffer: [4096]u8 = undefined;
+    var nix_file_writer = nix_file.writer(&nix_file_buffer);
+    const nix_writer = &nix_file_writer.interface;
 
     var fba_buffer: [4096]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&fba_buffer);
     const extension_allocator = fba.allocator();
     var extensions: std.ArrayList(ChromeExtension) = try .initCapacity(extension_allocator, 64);
 
-    const nix_file_content = try nix_file.readToEndAlloc(allocator, 64 * 1024);
+    var blocks: std.ArrayList([]const u8) = try .initCapacity(extension_allocator, 32);
+
+    const nix_file_content = try nix_file.readToEndAlloc(std.heap.page_allocator, 64 * 1024);
+    try nix_file.setEndPos(0);
+    try nix_file.seekTo(0);
+
+    var indent: ?usize = null;
+
     const needle = "(createChromiumExtension {";
     var haystack = nix_file_content;
     while (std.mem.indexOf(u8, haystack, needle)) |index| {
         const start = index + needle.len;
         const end = std.mem.indexOf(u8, haystack[start..], "})") orelse break;
         const chunk = haystack[start .. start + end];
+
+        if (indent == null) {
+            const count = std.mem.lastIndexOfScalar(u8, chunk, '\n').?;
+            indent = chunk.len - count - 1;
+        }
 
         var extension: ChromeExtension = .{
             .id = "",
@@ -57,17 +68,26 @@ pub fn main() !void {
         }
 
         const id = std.mem.sliceTo(chunk[id_index.? + id_marker.len ..], ';');
-        extension.id = try extension_allocator.dupe(u8, std.mem.trim(u8, id, "\""));
+        extension.id = try extension_allocator.dupe(u8, std.mem.trim(u8, id, " \""));
 
         const version = std.mem.sliceTo(chunk[version_index.? + version_marker.len ..], ';');
-        extension.version = try extension_allocator.dupe(u8, std.mem.trim(u8, version, "\""));
+        extension.version = try extension_allocator.dupe(u8, std.mem.trim(u8, version, " \""));
 
         try extensions.appendBounded(extension);
 
-        haystack = haystack[index + end ..];
+        try blocks.appendBounded(haystack[0 .. start + version_index.? + version_marker.len]);
+
+        haystack = haystack[start + end ..];
+    } else {
+        try blocks.appendBounded(haystack);
     }
 
-    for (extensions.items) |extension| {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    for (extensions.items, blocks.items[0 .. blocks.items.len - 1]) |extension, block| {
         _ = arena.reset(.retain_capacity);
 
         const browser_version = try getChromeVersion(allocator);
@@ -107,6 +127,12 @@ pub fn main() !void {
         else
             return error.NoVersionInManifest;
 
+        try nix_writer.writeAll(block);
+        try nix_writer.writeByte('"');
+        try nix_writer.writeAll(latest_version);
+        try nix_writer.writeAll("\";\n");
+        try nix_writer.splatByteAll(' ', indent.?);
+
         try stdout.print("{s}\n  current: {s}\n  latest:  {s}\n", .{
             extension_name,
             extension.version,
@@ -114,6 +140,9 @@ pub fn main() !void {
         });
     }
 
+    try nix_writer.writeAll(blocks.getLast());
+
+    try nix_writer.flush();
     try stdout.flush();
 }
 
