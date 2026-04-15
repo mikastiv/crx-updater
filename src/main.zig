@@ -12,8 +12,10 @@ const manifest_json = "manifest.json";
 const locale_dir = "_locales/en";
 
 const ChromeExtension = struct {
-    id: []const u8,
-    version: []const u8,
+    id: []u8,
+    hash: []u8,
+    version: []u8,
+    comment: []u8,
 };
 
 pub fn main() !void {
@@ -33,7 +35,7 @@ pub fn main() !void {
     var nix_file_writer = nix_file.writer(&nix_file_buffer);
     const nix_writer = &nix_file_writer.interface;
 
-    var fba_buffer: [4096]u8 = undefined;
+    var fba_buffer: [4096 * 2]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&fba_buffer);
     const extension_allocator = fba.allocator();
     var extensions: std.ArrayList(ChromeExtension) = try .initCapacity(extension_allocator, 64);
@@ -46,10 +48,15 @@ pub fn main() !void {
 
     var indent: ?usize = null;
 
-    const needle = "(createChromiumExtension {";
+    const id_marker = "id = \"";
+    const hash_marker = "sha256 = \"";
+    const version_marker = "version = \"";
+    const comment_marker = "# ";
+
+    const create_chromium_ext_text = "(createChromiumExtension {";
     var haystack = nix_file_content;
-    while (std.mem.indexOf(u8, haystack, needle)) |index| {
-        const start = index + needle.len;
+    while (std.mem.indexOf(u8, haystack, create_chromium_ext_text)) |index| {
+        const start = index + create_chromium_ext_text.len;
         const end = std.mem.indexOf(u8, haystack[start..], "})") orelse break;
         const chunk = haystack[start .. start + end];
 
@@ -60,13 +67,15 @@ pub fn main() !void {
 
         var extension: ChromeExtension = .{
             .id = "",
+            .hash = "",
             .version = "",
+            .comment = "",
         };
 
-        const id_marker = "id = ";
         const id_index = std.mem.indexOf(u8, chunk, id_marker);
-        const version_marker = "version = ";
+        const hash_index = std.mem.indexOf(u8, chunk, hash_marker);
         const version_index = std.mem.indexOf(u8, chunk, version_marker);
+        const comment_index = std.mem.indexOf(u8, chunk, comment_marker);
 
         if (id_index == null or version_index == null) {
             try stderr.writeAll("warning: missing data for an extension... skipping\n");
@@ -77,12 +86,18 @@ pub fn main() !void {
         const id = std.mem.sliceTo(chunk[id_index.? + id_marker.len ..], ';');
         extension.id = try extension_allocator.dupe(u8, std.mem.trim(u8, id, " \""));
 
+        const hash = std.mem.sliceTo(chunk[hash_index.? + hash_marker.len ..], ';');
+        extension.hash = try extension_allocator.dupe(u8, std.mem.trim(u8, hash, " \""));
+
         const version = std.mem.sliceTo(chunk[version_index.? + version_marker.len ..], ';');
         extension.version = try extension_allocator.dupe(u8, std.mem.trim(u8, version, " \""));
 
+        const comment = std.mem.sliceTo(chunk[comment_index.?..], '\n');
+        extension.comment = try extension_allocator.dupe(u8, comment);
+
         try extensions.appendBounded(extension);
 
-        try blocks.appendBounded(haystack[0 .. start + version_index.? + version_marker.len]);
+        try blocks.appendBounded(haystack[0..start]);
 
         haystack = haystack[start + end ..];
     } else {
@@ -134,8 +149,27 @@ pub fn main() !void {
         else
             return error.NoVersionInManifest;
 
+        if (!std.mem.eql(u8, extension.version, latest_version)) {
+            // if different versions, change last hash byte so nix rebuild prompts the correct one
+            extension.hash[extension.hash.len - 1] = 'a';
+        }
+
+        const params_offset = 2;
         try nix_writer.writeAll(block);
-        try nix_writer.writeByte('"');
+        try nix_writer.writeByte('\n');
+        try nix_writer.splatByteAll(' ', indent.? + params_offset);
+        try nix_writer.writeAll(extension.comment);
+        try nix_writer.writeByte('\n');
+        try nix_writer.splatByteAll(' ', indent.? + params_offset);
+        try nix_writer.writeAll(id_marker);
+        try nix_writer.writeAll(extension.id);
+        try nix_writer.writeAll("\";\n");
+        try nix_writer.splatByteAll(' ', indent.? + params_offset);
+        try nix_writer.writeAll(hash_marker);
+        try nix_writer.writeAll(extension.hash);
+        try nix_writer.writeAll("\";\n");
+        try nix_writer.splatByteAll(' ', indent.? + params_offset);
+        try nix_writer.writeAll(version_marker);
         try nix_writer.writeAll(latest_version);
         try nix_writer.writeAll("\";\n");
         try nix_writer.splatByteAll(' ', indent.?);
