@@ -31,12 +31,12 @@
         fs = lib.fileset;
         pkgs = import nixpkgs { inherit system; };
         version = "0.1.0";
-        zigPkg = zig.packages.${system}."0.15.2";
+        zigpkg = zig.packages.${system}."0.16.0";
       in
       {
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = [
-            zigPkg
+            zigpkg
             zls.packages.${system}.zls
           ];
         };
@@ -56,7 +56,7 @@
           };
 
           strictDeps = true;
-          nativeBuildInputs = [ zigPkg ];
+          nativeBuildInputs = [ zigpkg ];
 
           zigBuildFlags = [
             "-Doptimize=ReleaseSafe"

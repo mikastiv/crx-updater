@@ -1,13 +1,5 @@
 const std = @import("std");
 
-var stdout_buffer: [1024]u8 = undefined;
-var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-const stdout = &stdout_writer.interface;
-
-var stderr_buffer: [1024]u8 = undefined;
-var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-const stderr = &stderr_writer.interface;
-
 const manifest_json = "manifest.json";
 const locale_dir = "_locales/en";
 
@@ -18,33 +10,45 @@ const ChromeExtension = struct {
     comment: []u8,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const io = init.io;
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+    const stderr = &stderr_writer.interface;
+
     defer stdout.flush() catch {};
     defer stderr.flush() catch {};
 
-    if (std.os.argv.len != 2) {
+    const args = try init.minimal.args.toSlice(allocator);
+
+    if (args.len != 2) {
         try stderr.writeAll("usage: crx-updater <nix file path>\n");
         return error.MissingFilepath;
     }
 
-    const nix_filename = std.mem.span(std.os.argv[1]);
-    const nix_file = try std.fs.cwd().openFile(nix_filename, .{ .mode = .read_write });
-    defer nix_file.close();
+    const nix_filename = args[1];
+    const nix_file = try std.Io.Dir.cwd().openFile(io, nix_filename, .{ .mode = .read_write });
+    var nix_file_reader = nix_file.reader(io, &.{});
+
+    defer nix_file.close(io);
 
     var nix_file_buffer: [4096]u8 = undefined;
-    var nix_file_writer = nix_file.writer(&nix_file_buffer);
+    var nix_file_writer = nix_file.writer(io, &nix_file_buffer);
     const nix_writer = &nix_file_writer.interface;
 
-    var fba_buffer: [4096 * 2]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&fba_buffer);
-    const extension_allocator = fba.allocator();
-    var extensions: std.ArrayList(ChromeExtension) = try .initCapacity(extension_allocator, 64);
+    var extensions: std.ArrayList(ChromeExtension) = try .initCapacity(allocator, 64);
 
-    var blocks: std.ArrayList([]const u8) = try .initCapacity(extension_allocator, 32);
+    var blocks: std.ArrayList([]const u8) = try .initCapacity(allocator, 32);
 
-    const nix_file_content = try nix_file.readToEndAlloc(std.heap.page_allocator, 64 * 1024);
-    try nix_file.setEndPos(0);
-    try nix_file.seekTo(0);
+    const nix_file_content = try nix_file_reader.interface.allocRemaining(allocator, .limited(1024 * 1024 * 64));
+    try nix_file.setLength(io, 0);
+    try nix_file_writer.seekTo(0);
 
     var indent: ?usize = null;
 
@@ -84,16 +88,16 @@ pub fn main() !void {
         }
 
         const id = std.mem.sliceTo(chunk[id_index.? + id_marker.len ..], ';');
-        extension.id = try extension_allocator.dupe(u8, std.mem.trim(u8, id, " \""));
+        extension.id = try allocator.dupe(u8, std.mem.trim(u8, id, " \""));
 
         const hash = std.mem.sliceTo(chunk[hash_index.? + hash_marker.len ..], ';');
-        extension.hash = try extension_allocator.dupe(u8, std.mem.trim(u8, hash, " \""));
+        extension.hash = try allocator.dupe(u8, std.mem.trim(u8, hash, " \""));
 
         const version = std.mem.sliceTo(chunk[version_index.? + version_marker.len ..], ';');
-        extension.version = try extension_allocator.dupe(u8, std.mem.trim(u8, version, " \""));
+        extension.version = try allocator.dupe(u8, std.mem.trim(u8, version, " \""));
 
         const comment = std.mem.sliceTo(chunk[comment_index.?..], '\n');
-        extension.comment = try extension_allocator.dupe(u8, comment);
+        extension.comment = try allocator.dupe(u8, comment);
 
         try extensions.appendBounded(extension);
 
@@ -107,39 +111,44 @@ pub fn main() !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
 
-    const allocator = arena.allocator();
+    const tmp_allocator = arena.allocator();
 
     for (extensions.items, blocks.items[0 .. blocks.items.len - 1]) |extension, block| {
         _ = arena.reset(.retain_capacity);
 
-        const browser_version = try getChromeVersion(allocator);
+        const browser_version = try getChromeVersion(tmp_allocator, io);
 
-        const filename = try makeTempName(allocator);
+        const parent = "/tmp";
+        var tmp = try std.Io.Dir.openDirAbsolute(io, parent, .{});
+        defer tmp.close(io);
 
-        const zip_archive = try downloadCrxFile(allocator, filename, browser_version, extension.id);
-        defer std.fs.deleteFileAbsolute(filename) catch {};
-        defer zip_archive.close();
+        const filename = try makeTempName(tmp_allocator, io);
+
+        const zip_archive = try downloadCrxFile(tmp_allocator, io, tmp, filename, browser_version, extension.id);
+        defer tmp.deleteFile(io, filename) catch {};
+        defer zip_archive.close(io);
 
         var zip_buffer: [1024]u8 = undefined;
-        var zip_reader = zip_archive.reader(&zip_buffer);
+        var zip_reader = zip_archive.reader(io, &zip_buffer);
 
-        const tempdir = try makeTempName(allocator);
-        try std.fs.makeDirAbsolute(tempdir);
-        defer std.fs.deleteTreeAbsolute(tempdir) catch {};
+        const tempdir = try makeTempName(tmp_allocator, io);
 
-        var dest = try std.fs.openDirAbsolute(tempdir, .{});
-        defer dest.close();
+        try tmp.createDir(io, tempdir, .default_dir);
+        defer tmp.deleteTree(io, tempdir) catch {};
 
-        const locale = try extractManifestAndLocale(allocator, &zip_reader, dest);
+        var dest = try tmp.openDir(io, tempdir, .{});
+        defer dest.close(io);
 
-        const manifest = try dest.openFile(manifest_json, .{});
-        defer manifest.close();
+        const locale = try extractManifestAndLocale(tmp_allocator, &zip_reader, dest);
 
-        const root = try parseJsonFile(allocator, manifest);
+        const manifest = try dest.openFile(io, manifest_json, .{});
+        defer manifest.close(io);
+
+        const root = try parseJsonFile(tmp_allocator, io, manifest);
 
         var extension_name = if (root.object.get("name")) |name| name.string else "unknown";
         if (std.mem.startsWith(u8, extension_name, "__MSG")) {
-            if (try lookupLocaleName(allocator, dest, locale.?, extension_name)) |name| {
+            if (try lookupLocaleName(tmp_allocator, io, dest, locale.?, extension_name)) |name| {
                 extension_name = name;
             }
         }
@@ -188,14 +197,15 @@ pub fn main() !void {
 
 fn lookupLocaleName(
     allocator: std.mem.Allocator,
-    dest: std.fs.Dir,
+    io: std.Io,
+    dest: std.Io.Dir,
     locale: []const u8,
     placeholder: []const u8,
 ) !?[]const u8 {
-    const locale_file = try dest.openFile(locale, .{});
-    defer locale_file.close();
+    const locale_file = try dest.openFile(io, locale, .{});
+    defer locale_file.close(io);
 
-    const root = try parseJsonFile(allocator, locale_file);
+    const root = try parseJsonFile(allocator, io, locale_file);
 
     var it = std.mem.tokenizeScalar(u8, placeholder, '_');
     _ = it.next();
@@ -207,9 +217,9 @@ fn lookupLocaleName(
     return message.string;
 }
 
-fn parseJsonFile(allocator: std.mem.Allocator, file: std.fs.File) !std.json.Value {
+fn parseJsonFile(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File) !std.json.Value {
     var file_buffer: [1024]u8 = undefined;
-    var file_reader = file.reader(&file_buffer);
+    var file_reader = file.reader(io, &file_buffer);
     const reader = &file_reader.interface;
 
     var json_reader = std.json.Reader.init(allocator, reader);
@@ -220,8 +230,8 @@ fn parseJsonFile(allocator: std.mem.Allocator, file: std.fs.File) !std.json.Valu
 
 fn extractManifestAndLocale(
     allocator: std.mem.Allocator,
-    reader: *std.fs.File.Reader,
-    dest: std.fs.Dir,
+    reader: *std.Io.File.Reader,
+    dest: std.Io.Dir,
 ) !?[]const u8 {
     var it: std.zip.Iterator = try .init(reader);
     var filename_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -250,9 +260,8 @@ fn extractManifestAndLocale(
     return locale;
 }
 
-fn getChromeVersion(allocator: std.mem.Allocator) ![]const u8 {
-    const chrome_result = try std.process.Child.run(.{
-        .allocator = allocator,
+fn getChromeVersion(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+    const chrome_result = try std.process.run(allocator, io, .{
         .argv = &.{ "chromium", "--version" },
     });
 
@@ -266,11 +275,13 @@ fn getChromeVersion(allocator: std.mem.Allocator) ![]const u8 {
 
 fn downloadCrxFile(
     allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
     filename: []const u8,
     browser_version: []const u8,
     id: []const u8,
-) !std.fs.File {
-    var client: std.http.Client = .{ .allocator = allocator };
+) !std.Io.File {
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
     var response_writer: std.Io.Writer.Allocating = .init(allocator);
 
     const http_response = try client.fetch(.{
@@ -287,12 +298,13 @@ fn downloadCrxFile(
     const header_length = try reader.takeInt(u32, .little);
     reader.toss(header_length);
 
-    const file = try std.fs.createFileAbsolute(filename, .{ .read = true });
-    errdefer std.fs.deleteFileAbsolute(filename) catch {};
-    errdefer file.close();
+    const file = try dir.createFile(io, filename, .{ .read = true });
+    var file_reader = file.reader(io, &.{});
+    errdefer dir.deleteFile(io, filename) catch {};
+    errdefer file.close(io);
 
-    try file.writeAll(reader.buffered());
-    try file.seekTo(0);
+    try file.writeStreamingAll(io, reader.buffered());
+    try file_reader.seekTo(0);
 
     return file;
 }
@@ -308,9 +320,10 @@ fn makeDownloadUrl(
     return url;
 }
 
-fn makeTempName(allocator: std.mem.Allocator) ![]u8 {
-    const random_bytes = std.crypto.random.int(u64);
-    const name = try std.fmt.allocPrint(allocator, "/tmp/tmp_{x}", .{random_bytes});
+fn makeTempName(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+    const rng: std.Random.IoSource = .{ .io = io };
+    const random_bytes = rng.interface().int(u64);
+    const name = try std.fmt.allocPrint(allocator, "tmp_{x}", .{random_bytes});
 
     return name;
 }
