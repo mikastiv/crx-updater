@@ -5,7 +5,6 @@ const locale_dir = "_locales/en";
 
 const ChromeExtension = struct {
     id: []u8,
-    hash: []u8,
     version: []u8,
     comment: []u8,
 };
@@ -71,13 +70,11 @@ pub fn main(init: std.process.Init) !void {
 
         var extension: ChromeExtension = .{
             .id = "",
-            .hash = "",
             .version = "",
             .comment = "",
         };
 
         const id_index = std.mem.indexOf(u8, chunk, id_marker);
-        const hash_index = std.mem.indexOf(u8, chunk, hash_marker);
         const version_index = std.mem.indexOf(u8, chunk, version_marker);
         const comment_index = std.mem.indexOf(u8, chunk, comment_marker);
 
@@ -89,9 +86,6 @@ pub fn main(init: std.process.Init) !void {
 
         const id = std.mem.sliceTo(chunk[id_index.? + id_marker.len ..], ';');
         extension.id = try allocator.dupe(u8, std.mem.trim(u8, id, " \""));
-
-        const hash = std.mem.sliceTo(chunk[hash_index.? + hash_marker.len ..], ';');
-        extension.hash = try allocator.dupe(u8, std.mem.trim(u8, hash, " \""));
 
         const version = std.mem.sliceTo(chunk[version_index.? + version_marker.len ..], ';');
         extension.version = try allocator.dupe(u8, std.mem.trim(u8, version, " \""));
@@ -124,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
 
         const filename = try makeTempName(tmp_allocator, io);
 
-        const zip_archive = try downloadCrxFile(tmp_allocator, io, tmp, filename, browser_version, extension.id);
+        const zip_archive, const hash = try downloadCrxFile(tmp_allocator, io, tmp, filename, browser_version, extension.id);
         defer tmp.deleteFile(io, filename) catch {};
         defer zip_archive.close(io);
 
@@ -158,11 +152,6 @@ pub fn main(init: std.process.Init) !void {
         else
             return error.NoVersionInManifest;
 
-        if (!std.mem.eql(u8, extension.version, latest_version)) {
-            // if different versions, change last hash byte so nix rebuild prompts the correct one
-            extension.hash[extension.hash.len - 1] = 'a';
-        }
-
         const params_offset = 2;
         try nix_writer.writeAll(block);
         try nix_writer.writeByte('\n');
@@ -175,7 +164,7 @@ pub fn main(init: std.process.Init) !void {
         try nix_writer.writeAll("\";\n");
         try nix_writer.splatByteAll(' ', indent.? + params_offset);
         try nix_writer.writeAll(hash_marker);
-        try nix_writer.writeAll(extension.hash);
+        try nix_writer.writeAll(hash);
         try nix_writer.writeAll("\";\n");
         try nix_writer.splatByteAll(' ', indent.? + params_offset);
         try nix_writer.writeAll(version_marker);
@@ -280,7 +269,7 @@ fn downloadCrxFile(
     filename: []const u8,
     browser_version: []const u8,
     id: []const u8,
-) !std.Io.File {
+) !struct { std.Io.File, []u8 } {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     var response_writer: std.Io.Writer.Allocating = .init(allocator);
 
@@ -290,6 +279,28 @@ fn downloadCrxFile(
     });
 
     if (http_response.status != .ok) return error.DownloadFailed;
+
+    const tmp_name = try makeTempName(allocator, io);
+    const tmp_file = try dir.createFile(io, tmp_name, .{});
+    defer dir.deleteFile(io, tmp_name) catch {};
+    defer tmp_file.close(io);
+
+    try tmp_file.writeStreamingAll(io, response_writer.written());
+
+    const result = try std.process.run(allocator, io, .{
+        .argv = &.{
+            "nix-hash",
+            "--flat",
+            "--base32",
+            "--type",
+            "sha256",
+            tmp_name,
+        },
+        .cwd = .{ .dir = dir },
+    });
+
+    const base32 = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
+    const file_hash = try std.fmt.allocPrint(allocator, "sha256:{s}", .{base32});
 
     var reader = std.Io.Reader.fixed(response_writer.written());
     const magic = try reader.takeInt(u32, .little);
@@ -306,7 +317,7 @@ fn downloadCrxFile(
     try file.writeStreamingAll(io, reader.buffered());
     try file_reader.seekTo(0);
 
-    return file;
+    return .{ file, file_hash };
 }
 
 fn makeDownloadUrl(
