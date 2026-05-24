@@ -7,7 +7,6 @@ const locale_dir = "_locales/en";
 const ChromeExtension = struct {
     id: []u8,
     version: []u8,
-    comment: []u8,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -22,8 +21,10 @@ pub fn main(init: std.process.Init) !void {
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
 
-    defer stdout.flush() catch {};
-    defer stderr.flush() catch {};
+    defer {
+        stdout.flush() catch {};
+        stderr.flush() catch {};
+    }
 
     const args = try init.minimal.args.toSlice(allocator);
 
@@ -34,19 +35,20 @@ pub fn main(init: std.process.Init) !void {
 
     const nix_filename = args[1];
     const nix_file = try std.Io.Dir.cwd().openFile(io, nix_filename, .{ .mode = .read_write });
-    var nix_file_reader = nix_file.reader(io, &.{});
-
     defer nix_file.close(io);
 
+    var nix_file_reader = nix_file.reader(io, &.{});
     var nix_file_buffer: [4096]u8 = undefined;
     var nix_file_writer = nix_file.writer(io, &nix_file_buffer);
+
+    const nix_reader = &nix_file_reader.interface;
     const nix_writer = &nix_file_writer.interface;
 
     var extensions: std.ArrayList(ChromeExtension) = try .initCapacity(allocator, 64);
 
     var blocks: std.ArrayList([]const u8) = try .initCapacity(allocator, 32);
 
-    const nix_file_content = try nix_file_reader.interface.allocRemaining(allocator, .limited(1024 * 1024 * 64));
+    const nix_file_content = try nix_reader.allocRemaining(allocator, .limited(1024 * 1024 * 64));
     try nix_file.setLength(io, 0);
     try nix_file_writer.seekTo(0);
 
@@ -55,7 +57,6 @@ pub fn main(init: std.process.Init) !void {
     const id_marker = "id = \"";
     const hash_marker = "sha256 = \"";
     const version_marker = "version = \"";
-    const comment_marker = "# ";
 
     const create_chromium_ext_text = "(createChromiumExtension {";
     var haystack = nix_file_content;
@@ -72,12 +73,10 @@ pub fn main(init: std.process.Init) !void {
         var extension: ChromeExtension = .{
             .id = "",
             .version = "",
-            .comment = "",
         };
 
         const id_index = std.mem.indexOf(u8, chunk, id_marker);
         const version_index = std.mem.indexOf(u8, chunk, version_marker);
-        const comment_index = std.mem.indexOf(u8, chunk, comment_marker);
 
         if (id_index == null or version_index == null) {
             try stderr.writeAll("warning: missing data for an extension... skipping\n");
@@ -91,12 +90,9 @@ pub fn main(init: std.process.Init) !void {
         const version = std.mem.sliceTo(chunk[version_index.? + version_marker.len ..], ';');
         extension.version = try allocator.dupe(u8, std.mem.trim(u8, version, " \""));
 
-        const comment = std.mem.sliceTo(chunk[comment_index.?..], '\n');
-        extension.comment = try allocator.dupe(u8, comment);
-
         try extensions.appendBounded(extension);
 
-        try blocks.appendBounded(haystack[0..start]);
+        try blocks.appendBounded(haystack[0 .. start + id_index.?]);
 
         haystack = haystack[start + end ..];
     } else {
@@ -155,11 +151,6 @@ pub fn main(init: std.process.Init) !void {
 
         const params_offset = 2;
         try nix_writer.writeAll(block);
-        try nix_writer.writeByte('\n');
-        try nix_writer.splatByteAll(' ', indent.? + params_offset);
-        try nix_writer.writeAll(extension.comment);
-        try nix_writer.writeByte('\n');
-        try nix_writer.splatByteAll(' ', indent.? + params_offset);
         try nix_writer.writeAll(id_marker);
         try nix_writer.writeAll(extension.id);
         try nix_writer.writeAll("\";\n");
