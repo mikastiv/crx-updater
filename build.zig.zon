@@ -3,7 +3,12 @@
     .version = "0.1.0",
     .fingerprint = 0x3853680f23cf8d99,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .mksv = .{
+            .url = "git+https://codeberg.org/mikastiv/mksv#30c8d2fc97ba3d09764a3990b4f1516768fa6927",
+            .hash = "mksv-0.0.1-SesxeIg4AAAxnAqrX4eSfBB-mFjYmbWpbgdfOWOZ2UU_",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

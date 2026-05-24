@@ -1,4 +1,5 @@
 const std = @import("std");
+const mksv = @import("mksv");
 
 const manifest_json = "manifest.json";
 const locale_dir = "_locales/en";
@@ -280,26 +281,12 @@ fn downloadCrxFile(
 
     if (http_response.status != .ok) return error.DownloadFailed;
 
-    const tmp_name = try makeTempName(allocator, io);
-    const tmp_file = try dir.createFile(io, tmp_name, .{});
-    defer dir.deleteFile(io, tmp_name) catch {};
-    defer tmp_file.close(io);
+    var sha256: std.crypto.hash.sha2.Sha256 = .init(.{});
+    sha256.update(response_writer.written());
+    const hash = sha256.finalResult();
 
-    try tmp_file.writeStreamingAll(io, response_writer.written());
-
-    const result = try std.process.run(allocator, io, .{
-        .argv = &.{
-            "nix-hash",
-            "--flat",
-            "--base32",
-            "--type",
-            "sha256",
-            tmp_name,
-        },
-        .cwd = .{ .dir = dir },
-    });
-
-    const base32 = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
+    var buffer: [64]u8 = undefined;
+    const base32 = mksv.hash.nix32.encode(&buffer, &hash);
     const file_hash = try std.fmt.allocPrint(allocator, "sha256:{s}", .{base32});
 
     var reader = std.Io.Reader.fixed(response_writer.written());
