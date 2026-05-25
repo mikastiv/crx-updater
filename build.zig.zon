@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .mksv = .{
-            .url = "https://codeberg.org/mikastiv/mksv/archive/main.tar.gz",
+            .url = "git+https://codeberg.org/mikastiv/mksv.git#30c8d2fc97ba3d09764a3990b4f1516768fa6927",
             .hash = "mksv-0.0.1-SesxeIg4AAAxnAqrX4eSfBB-mFjYmbWpbgdfOWOZ2UU_",
         },
     },

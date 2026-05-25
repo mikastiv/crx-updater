@@ -3,73 +3,70 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
 
-    zig = {
-      url = "github:mitchellh/zig-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    zls = {
-      url = "github:zigtools/zls";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    zig-flake.url = "github:silversquirl/zig-flake";
+    zig-flake.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
     {
       self,
       nixpkgs,
-      zig,
-      zls,
-      flake-utils,
+      zig-flake,
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        lib = nixpkgs.lib;
-        fs = lib.fileset;
-        pkgs = import nixpkgs { inherit system; };
-        version = "0.1.0";
-        zigpkg = zig.packages.${system}."0.16.0";
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          nativeBuildInputs = [
-            zigpkg
-            zls.packages.${system}.zls
-          ];
-        };
-
-        packages.default = pkgs.stdenvNoCC.mkDerivation {
-          pname = "crx_updater";
-          version = version;
-          src = fs.toSource {
-            root = ./.;
-            fileset = fs.intersection (fs.fromSource (lib.sources.cleanSource ./.)) (
-              fs.unions [
-                ./src
-                ./build.zig
-                ./build.zig.zon
-              ]
-            );
+    let
+      lib = nixpkgs.lib;
+      fs = lib.fileset;
+      forAllSystems =
+        f:
+        builtins.mapAttrs (
+          system: pkgs: f system pkgs zig-flake.packages.${system}.zig_0_16_0
+        ) nixpkgs.legacyPackages;
+    in
+    {
+      devShells = forAllSystems (
+        system: pkgs: zig: {
+          default = pkgs.mkShellNoCC {
+            nativeBuildInputs = [
+              zig
+              zig.zls
+            ];
           };
+        }
+      );
 
-          strictDeps = true;
-          nativeBuildInputs = [ zigpkg ];
+      packages = forAllSystems (
+        system: pkgs: zig: {
+          default = pkgs.stdenvNoCC.mkDerivation {
+            name = "crx_updater";
+            version = "0.1.0";
+            meta.mainProgram = "crx_updater";
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.intersection (fs.fromSource (lib.sources.cleanSource ./.)) (
+                fs.unions [
+                  ./src
+                  ./build.zig
+                  ./build.zig.zon
+                  ./deps.nix
+                ]
+              );
+            };
 
-          zigBuildFlags = [
-            "-Doptimize=ReleaseSafe"
-          ];
+            nativeBuildInputs = [ zig ];
+            dontInstall = true;
+            strictDeps = true;
 
-          configurePhase = ''
-            export ZIG_GLOBAL_CACHE_DIR=$TEMP/.cache
-          '';
+            configurePhase = ''
+              export ZIG_GLOBAL_CACHE_DIR=$TEMP/.cache
+              PACKAGE_DIR=${pkgs.callPackage ./deps.nix { }}
+            '';
 
-          buildPhase = ''
-            zig build install --color off --prefix $out
-          '';
-        };
-      }
-    );
+            buildPhase = ''
+              zig build install --system $PACKAGE_DIR -Doptimize=ReleaseSafe --color off --prefix $out
+            '';
+          };
+        }
+      );
+    };
 }
