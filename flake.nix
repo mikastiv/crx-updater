@@ -42,7 +42,7 @@
         };
 
         packages.default = pkgs.stdenvNoCC.mkDerivation {
-          pname = "ziginit";
+          pname = "crx_updater";
           version = version;
           src = fs.toSource {
             root = ./.;
